@@ -32,6 +32,12 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Poker Social uses your photo library so you can set a profile picture."
+        }
       ]
     ],
     "experiments": {

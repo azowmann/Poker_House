@@ -123,6 +123,130 @@ describe('database schema', () => {
     });
   });
 
+  describe('leaving a house', () => {
+    // A dedicated, throwaway house - never touches houseId/bob's membership in it,
+    // which every test after this one still depends on.
+    let leaveHouseId: string;
+    let leaveJoinCode: string;
+
+    beforeAll(async () => {
+      await t.asUser(alice);
+      const house = await t.query<{ id: string; join_code: string }>(
+        `insert into public.houses (name, owner_id) values ('Leave Test House', $1) returning id, join_code`,
+        [alice]
+      );
+      leaveHouseId = house[0].id;
+      leaveJoinCode = house[0].join_code;
+      await t.query(`insert into public.memberships (house_id, user_id) values ($1, $2)`, [
+        leaveHouseId,
+        alice,
+      ]);
+
+      await t.asUser(bob);
+      await t.query(`select public.join_house($1)`, [leaveJoinCode]);
+    });
+
+    afterAll(async () => {
+      await t.asUser(alice);
+      await t.query(`delete from public.houses where id = $1`, [leaveHouseId]);
+    });
+
+    it("blocks the owner from deleting their own membership", async () => {
+      await t.asUser(alice);
+      const n = await t.affected(
+        `delete from public.memberships where house_id = $1 and user_id = $2`,
+        [leaveHouseId, alice]
+      );
+      expect(n).toBe(0);
+    });
+
+    it('lets a regular member leave', async () => {
+      await t.asUser(bob);
+      const n = await t.affected(
+        `delete from public.memberships where house_id = $1 and user_id = $2`,
+        [leaveHouseId, bob]
+      );
+      expect(n).toBe(1);
+    });
+
+    it("still lets the owner remove someone else's membership", async () => {
+      await t.asUser(bob);
+      await t.query(`select public.join_house($1)`, [leaveJoinCode]); // bob rejoins after leaving above
+
+      await t.asUser(alice);
+      const n = await t.affected(
+        `delete from public.memberships where house_id = $1 and user_id = $2`,
+        [leaveHouseId, bob]
+      );
+      expect(n).toBe(1);
+    });
+  });
+
+  describe('deleting a house', () => {
+    it('is refused for a non-owner, and cascades everything for the owner - even a settled game', async () => {
+      await t.asUser(alice);
+      const house = await t.query<{ id: string; join_code: string }>(
+        `insert into public.houses (name, owner_id) values ('Delete Test House', $1) returning id, join_code`,
+        [alice]
+      );
+      const deleteHouseId = house[0].id;
+      await t.query(`insert into public.memberships (house_id, user_id) values ($1, $2)`, [
+        deleteHouseId,
+        alice,
+      ]);
+
+      await t.asUser(bob);
+      await t.query(`select public.join_house($1)`, [house[0].join_code]);
+
+      await t.asUser(alice);
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [deleteHouseId]
+      );
+      const player = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [game[0].id, alice]
+      );
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 2000)`, [
+        player[0].id,
+      ]);
+      await t.query(`update public.game_players set final_stack_cents = 2000 where id = $1`, [
+        player[0].id,
+      ]);
+      await t.query(`update public.games set status = 'settled' where id = $1`, [game[0].id]);
+
+      await t.asUser(bob);
+      const blocked = await t.affected(`delete from public.houses where id = $1`, [deleteHouseId]);
+      expect(blocked).toBe(0);
+
+      await t.asUser(alice);
+      const n = await t.affected(`delete from public.houses where id = $1`, [deleteHouseId]);
+      expect(n).toBe(1);
+
+      const remainingMemberships = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.memberships where house_id = $1`,
+        [deleteHouseId]
+      );
+      const remainingGames = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.games where house_id = $1`,
+        [deleteHouseId]
+      );
+      const remainingPlayers = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.game_players where game_id = $1`,
+        [game[0].id]
+      );
+      const remainingBuyIns = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.buy_ins where game_player_id = $1`,
+        [player[0].id]
+      );
+
+      expect(remainingMemberships[0].n).toBe(0);
+      expect(remainingGames[0].n).toBe(0);
+      expect(remainingPlayers[0].n).toBe(0);
+      expect(remainingBuyIns[0].n).toBe(0);
+    });
+  });
+
   describe('row level security', () => {
     it('hides houses, memberships and housemates from an outsider', async () => {
       await t.asUser(carol);
@@ -229,8 +353,15 @@ describe('database schema', () => {
       ).rejects.toThrow(/1 of 2 player\(s\) have no final stack/);
     });
 
-    it('succeeds once everyone has cashed out', async () => {
+    it('succeeds once everyone has cashed out, and stamps settled_at', async () => {
       await t.asUser(alice);
+
+      const beforeRows = await t.query<{ settled_at: string | null }>(
+        `select settled_at from public.games where id = $1`,
+        [gameId]
+      );
+      expect(beforeRows[0].settled_at).toBeNull();
+
       await t.query(`update public.game_players set final_stack_cents = 5000 where id = $1`, [
         bobPlayerId,
       ]);
@@ -239,6 +370,17 @@ describe('database schema', () => {
         gameId,
       ]);
       expect(n).toBe(1);
+
+      const afterRows = await t.query<{ settled_at: string | null; created_at: string }>(
+        `select settled_at, created_at from public.games where id = $1`,
+        [gameId]
+      );
+      // Stamped by the trigger, not the client - and distinct from created_at,
+      // which is when the game was started, not when it was settled.
+      expect(afterRows[0].settled_at).not.toBeNull();
+      expect(new Date(afterRows[0].settled_at!).getTime()).toBeGreaterThanOrEqual(
+        new Date(afterRows[0].created_at).getTime()
+      );
     });
 
     it('refuses to settle a game with no players', async () => {
@@ -251,13 +393,19 @@ describe('database schema', () => {
       await expect(
         t.query(`update public.games set status = 'settled' where id = $1`, [empty[0].id])
       ).rejects.toThrow(/has no players/);
+
+      // The rejected settle leaves this game active - clean it up, or it is the
+      // house's one allowed active game for every test that runs after this one
+      // (see "at most one active game per house" below).
+      await t.query(`delete from public.games where id = $1`, [empty[0].id]);
     });
   });
 
-  describe('settled games are frozen', () => {
+  describe('settled games are frozen against edits', () => {
     // RLS filters these rows out rather than raising, so the tell is 0 rows
-    // affected, not an error.
-    it('rejects edits to a player, a buy-in, or the game itself', async () => {
+    // affected, not an error. Deleting the game itself is a different question -
+    // see "deleting a game" below, since the owner actually can.
+    it('rejects edits to a player or a buy-in', async () => {
       await t.asUser(alice);
 
       const player = await t.affected(
@@ -268,9 +416,262 @@ describe('database schema', () => {
         `update public.buy_ins set amount_cents = 1 where game_player_id = $1`,
         [alicePlayerId]
       );
-      const game = await t.affected(`delete from public.games where id = $1`, [gameId]);
 
-      expect({ player, buyIn, game }).toEqual({ player: 0, buyIn: 0, game: 0 });
+      expect({ player, buyIn }).toEqual({ player: 0, buyIn: 0 });
+    });
+  });
+
+  describe('deleting a game', () => {
+    // A dedicated, throwaway house - never touches houseId/gameId, which the
+    // leaderboard tests below still depend on.
+    let deleteGameHouseId: string;
+    let deleteGameJoinCode: string;
+
+    beforeAll(async () => {
+      await t.asUser(alice);
+      const house = await t.query<{ id: string; join_code: string }>(
+        `insert into public.houses (name, owner_id) values ('Delete Game Test House', $1) returning id, join_code`,
+        [alice]
+      );
+      deleteGameHouseId = house[0].id;
+      deleteGameJoinCode = house[0].join_code;
+      await t.query(`insert into public.memberships (house_id, user_id) values ($1, $2)`, [
+        deleteGameHouseId,
+        alice,
+      ]);
+
+      await t.asUser(bob);
+      await t.query(`select public.join_house($1)`, [deleteGameJoinCode]);
+    });
+
+    afterAll(async () => {
+      await t.asUser(alice);
+      await t.query(`delete from public.houses where id = $1`, [deleteGameHouseId]);
+    });
+
+    it('refuses a non-owner member, whether the game is active or settled', async () => {
+      await t.asUser(alice);
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [deleteGameHouseId]
+      );
+
+      await t.asUser(bob);
+      const blockedActive = await t.affected(`delete from public.games where id = $1`, [
+        game[0].id,
+      ]);
+      expect(blockedActive).toBe(0);
+
+      await t.asUser(alice);
+      const player = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [game[0].id, alice]
+      );
+      await t.query(`update public.game_players set final_stack_cents = 0 where id = $1`, [
+        player[0].id,
+      ]);
+      await t.query(`update public.games set status = 'settled' where id = $1`, [game[0].id]);
+
+      await t.asUser(bob);
+      const blockedSettled = await t.affected(`delete from public.games where id = $1`, [
+        game[0].id,
+      ]);
+      expect(blockedSettled).toBe(0);
+
+      await t.asUser(alice);
+      await t.query(`delete from public.games where id = $1`, [game[0].id]);
+    });
+
+    it('lets the owner delete an active game', async () => {
+      await t.asUser(alice);
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [deleteGameHouseId]
+      );
+
+      const n = await t.affected(`delete from public.games where id = $1`, [game[0].id]);
+      expect(n).toBe(1);
+    });
+
+    it('lets the owner delete a settled game, cascading its players and buy-ins', async () => {
+      await t.asUser(alice);
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [deleteGameHouseId]
+      );
+      const player = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [game[0].id, alice]
+      );
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 2000)`, [
+        player[0].id,
+      ]);
+      await t.query(`update public.game_players set final_stack_cents = 2000 where id = $1`, [
+        player[0].id,
+      ]);
+      await t.query(`update public.games set status = 'settled' where id = $1`, [game[0].id]);
+
+      const n = await t.affected(`delete from public.games where id = $1`, [game[0].id]);
+      expect(n).toBe(1);
+
+      const remainingPlayers = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.game_players where game_id = $1`,
+        [game[0].id]
+      );
+      const remainingBuyIns = await t.query<{ n: number }>(
+        `select count(*)::int as n from public.buy_ins where game_player_id = $1`,
+        [player[0].id]
+      );
+      expect(remainingPlayers[0].n).toBe(0);
+      expect(remainingBuyIns[0].n).toBe(0);
+    });
+  });
+
+  describe('at most one active game per house', () => {
+    // gameId was settled by the previous block, so houseId currently has zero
+    // active games - a clean slate for these two tests.
+
+    it('rejects a second active game while one is already active', async () => {
+      await t.asUser(alice);
+
+      const first = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [houseId]
+      );
+      const firstActiveGameId = first[0].id;
+
+      await expect(
+        t.query(`insert into public.games (house_id) values ($1)`, [houseId])
+      ).rejects.toThrow(/duplicate key value violates unique constraint "games_one_active_per_house"/);
+
+      // Free the slot so it doesn't leak into the next test.
+      await t.query(`delete from public.games where id = $1`, [firstActiveGameId]);
+    });
+
+    it('allows a new active game once the earlier one is no longer active', async () => {
+      await t.asUser(alice);
+
+      // The games INSERT policy requires status = 'active', so a game can never be
+      // created already settled - meaning the only way to reach "no longer
+      // active" is a delete or the real settle flow (covered elsewhere in this
+      // file). A delete is enough to isolate just the partial index's behavior:
+      // uniqueness is scoped to status = 'active', not to house_id alone.
+      const first = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [houseId]
+      );
+      await t.query(`delete from public.games where id = $1`, [first[0].id]);
+
+      const second = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [houseId]
+      );
+      expect(second).toHaveLength(1);
+
+      await t.query(`delete from public.games where id = $1`, [second[0].id]);
+    });
+  });
+
+  describe('buy-in corrections', () => {
+    // A self-contained game+player, created and torn down within this block, so
+    // these rows never touch alice's totals in the leaderboard tests below.
+    let correctionGameId: string;
+    let correctionPlayerId: string;
+
+    beforeAll(async () => {
+      await t.asUser(alice);
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [houseId]
+      );
+      correctionGameId = game[0].id;
+
+      const player = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [correctionGameId, alice]
+      );
+      correctionPlayerId = player[0].id;
+
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 5000)`, [
+        correctionPlayerId,
+      ]);
+    });
+
+    afterAll(async () => {
+      await t.asUser(alice);
+      await t.query(`delete from public.games where id = $1`, [correctionGameId]);
+    });
+
+    it('rejects a zero-amount row - it would correct nothing', async () => {
+      await t.asUser(alice);
+      await expect(
+        t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 0)`, [
+          correctionPlayerId,
+        ])
+      ).rejects.toThrow(/violates check constraint "buy_ins_amount_nonzero"/);
+    });
+
+    it('accepts a negative row that corrects a mistaken buy-in', async () => {
+      await t.asUser(alice);
+      // The $50 buy-in from beforeAll was a mis-click; -$30 corrects it to $20.
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, -3000)`, [
+        correctionPlayerId,
+      ]);
+
+      const rows = await t.query<{ total: string }>(
+        `select sum(amount_cents)::int as total from public.buy_ins where game_player_id = $1`,
+        [correctionPlayerId]
+      );
+      expect(Number(rows[0].total)).toBe(2000);
+    });
+  });
+
+  describe('settle requires nets to sum to zero', () => {
+    it('refuses a settle where every stack is present but the numbers do not balance', async () => {
+      await t.asUser(alice);
+
+      const game = await t.query<{ id: string }>(
+        `insert into public.games (house_id) values ($1) returning id`,
+        [houseId]
+      );
+      const mismatchGameId = game[0].id;
+
+      const a = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [mismatchGameId, alice]
+      );
+      const b = await t.query<{ id: string }>(
+        `insert into public.game_players (game_id, user_id) values ($1, $2) returning id`,
+        [mismatchGameId, bob]
+      );
+
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 2000)`, [
+        a[0].id,
+      ]);
+      await t.query(`insert into public.buy_ins (game_player_id, amount_cents) values ($1, 2000)`, [
+        b[0].id,
+      ]);
+
+      // Both stacks are present (passes the earlier checks), but a's stack was
+      // mistyped: 2500 instead of 2000, so the table gained $5 that never
+      // existed. Net total: +500 - 2000 = -1500 cents, not zero.
+      await t.query(`update public.game_players set final_stack_cents = 2500 where id = $1`, [
+        a[0].id,
+      ]);
+      await t.query(`update public.game_players set final_stack_cents = 0 where id = $1`, [b[0].id]);
+
+      await expect(
+        t.query(`update public.games set status = 'settled' where id = $1`, [mismatchGameId])
+      ).rejects.toThrow(/nets total -1500 cents instead of 0/);
+
+      // The rejected settle must not have left the game settled anyway.
+      const rows = await t.query<{ status: string; settled_at: string | null }>(
+        `select status, settled_at from public.games where id = $1`,
+        [mismatchGameId]
+      );
+      expect(rows[0]).toEqual({ status: 'active', settled_at: null });
+
+      await t.query(`delete from public.games where id = $1`, [mismatchGameId]);
     });
   });
 
@@ -341,6 +742,65 @@ describe('database schema', () => {
         `select count(*)::int as n from public.house_leaderboards`
       );
       expect(rows[0].n).toBe(0);
+    });
+  });
+
+  describe('avatar uploads', () => {
+    it("lets a user upload into their own folder, not someone else's", async () => {
+      await t.asUser(alice);
+      const own = await t.affected(
+        `insert into storage.objects (bucket_id, name, owner) values ('avatars', $1, $2)`,
+        [`${alice}/avatar.jpg`, alice]
+      );
+      expect(own).toBe(1);
+
+      await expect(
+        t.query(`insert into storage.objects (bucket_id, name, owner) values ('avatars', $1, $2)`, [
+          `${bob}/avatar.jpg`,
+          alice,
+        ])
+      ).rejects.toThrow(/row-level security/);
+    });
+
+    it('is publicly readable, including by a signed-out caller', async () => {
+      await t.asAnon();
+      const rows = await t.query<{ name: string }>(
+        `select name from storage.objects where bucket_id = 'avatars' and name = $1`,
+        [`${alice}/avatar.jpg`]
+      );
+      expect(rows).toHaveLength(1);
+    });
+
+    it("lets a user replace their own avatar, not someone else's", async () => {
+      await t.asUser(bob);
+      const stranger = await t.affected(
+        `update storage.objects set name = name where bucket_id = 'avatars' and name = $1`,
+        [`${alice}/avatar.jpg`]
+      );
+      expect(stranger).toBe(0);
+
+      await t.asUser(alice);
+      const owner = await t.affected(
+        `update storage.objects set name = name where bucket_id = 'avatars' and name = $1`,
+        [`${alice}/avatar.jpg`]
+      );
+      expect(owner).toBe(1);
+    });
+
+    it("lets a user delete their own avatar, not someone else's", async () => {
+      await t.asUser(bob);
+      const stranger = await t.affected(
+        `delete from storage.objects where bucket_id = 'avatars' and name = $1`,
+        [`${alice}/avatar.jpg`]
+      );
+      expect(stranger).toBe(0);
+
+      await t.asUser(alice);
+      const owner = await t.affected(
+        `delete from storage.objects where bucket_id = 'avatars' and name = $1`,
+        [`${alice}/avatar.jpg`]
+      );
+      expect(owner).toBe(1);
     });
   });
 

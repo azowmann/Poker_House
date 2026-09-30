@@ -26,6 +26,7 @@ export default function SignInScreen() {
   const { session, isRestoring } = useAuth();
 
   const [mode, setMode] = useState<Mode>('signIn');
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -52,7 +53,13 @@ export default function SignInScreen() {
   }
 
   async function submit() {
+    const trimmedName = name.trim();
     const trimmedEmail = email.trim();
+
+    if (isSignUp && !trimmedName) {
+      setError('Enter your name.');
+      return;
+    }
     if (!trimmedEmail || !password) {
       setError('Enter an email and password.');
       return;
@@ -67,6 +74,12 @@ export default function SignInScreen() {
         const { data, error: signUpError } = await supabase.auth.signUp({
           email: trimmedEmail,
           password,
+          // handle_new_user (the DB trigger that creates public.users on signup)
+          // already prefers full_name/name from this metadata over the email - the
+          // same fields Google OAuth populates automatically. Without this, an
+          // email/password signup falls through to the email's local part, which
+          // is the "alanzhou531 on the leaderboard" problem this field exists to fix.
+          options: { data: { full_name: trimmedName } },
         });
 
         if (signUpError) {
@@ -143,6 +156,27 @@ export default function SignInScreen() {
             )}
 
             <View style={styles.form}>
+              {isSignUp ? (
+                <Field label="Name">
+                  <TextInput
+                    value={name}
+                    onChangeText={setName}
+                    placeholder="Your name"
+                    placeholderTextColor={theme.textSecondary}
+                    autoCapitalize="words"
+                    autoCorrect={false}
+                    autoComplete="name"
+                    textContentType="name"
+                    maxLength={60}
+                    editable={!busy}
+                    style={[
+                      styles.input,
+                      { color: theme.text, backgroundColor: theme.backgroundElement },
+                    ]}
+                  />
+                </Field>
+              ) : null}
+
               <Field label="Email">
                 <TextInput
                   value={email}

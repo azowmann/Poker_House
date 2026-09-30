@@ -1,56 +1,128 @@
-# Welcome to your Expo app 👋
+# Poker Social
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A mobile app for tracking in-person poker home games with friends. Players form a
+"house," record cash games (buy-ins, rebuys, cash-outs), and see per-game and
+all-time leaderboards. At the end of a game the app computes the fewest money
+transfers needed to settle everyone up.
 
-## Get started
+This is **not** an online poker game — there's no gameplay and no real-money
+gambling backend. It's a ledger for games you're already playing in person.
 
-1. Install dependencies
+> **Status:** work in progress. Core flows (auth, houses, games, settlement) run
+> end-to-end against a live Supabase project, but this isn't a finished product yet.
+
+## Features
+
+- **Houses** — create a house and get a join code, or join one a friend started
+- **Live games** — add players, track buy-ins and rebuys as the game is played
+- **Settling up** — enter final stacks and get the minimum set of transfers needed
+  to zero everyone out (e.g. "Alice pays Bob $20, Alice pays Carol $10")
+- **Leaderboards** — all-time net winnings per house, computed from game history
+  (never stored, so it can't drift out of sync)
+- **Auth** — Google and email sign-in via Supabase
+- **Profiles** — display name, avatar upload, password change
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| App | [React Native](https://reactnative.dev/) + [Expo](https://expo.dev) (SDK 57), TypeScript |
+| Routing | [Expo Router](https://docs.expo.dev/router/introduction/) (file-based) |
+| Backend | [Supabase](https://supabase.com) — Postgres, Auth, Storage, auto-generated API |
+| Access control | Postgres Row Level Security (default-deny; no service-role key in the app) |
+| Testing | [Jest](https://jestjs.io/) — unit tests for pure logic, plus schema tests that run real migrations against an in-memory Postgres ([PGlite](https://github.com/electric-sql/pglite)) |
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data model and the reasoning
+behind these choices.
+
+## Getting started
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) 20+
+- A [Supabase](https://supabase.com) project (free tier is fine)
+- The [Expo Go](https://expo.dev/go) app, or an iOS/Android simulator, to run the app
+
+### Setup
+
+1. Install dependencies:
 
    ```bash
    npm install
    ```
 
-2. Start the app
+2. Configure Supabase. Copy `.env.example` to `.env` and fill in your project's
+   URL and anon key (Supabase dashboard → **Project Settings → API**):
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Both values are safe to ship in the app bundle — they identify the project,
+   not grant access. Row Level Security decides what a caller may read or write.
+   **Never** put the `service_role` key here.
+
+3. Apply the database schema. Either link to your hosted project and push the
+   migrations:
+
+   ```bash
+   npx supabase link --project-ref <your-project-ref>
+   npx supabase db push
+   ```
+
+   or run Supabase locally with the CLI ([Docker](https://www.docker.com/) required):
+
+   ```bash
+   npx supabase start
+   ```
+
+4. Start the app:
 
    ```bash
    npx expo start
    ```
 
-In the output, you'll find options to open the app in a
+   Then open it in Expo Go, an iOS simulator, an Android emulator, or a web
+   browser from the Expo CLI output.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## Scripts
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+| Command | What it does |
+|---|---|
+| `npm start` | Start the Expo dev server |
+| `npm run ios` / `npm run android` / `npm run web` | Start on a specific platform |
+| `npm run lint` | Lint the project |
+| `npm test` | Run all tests (unit + schema) |
+| `npm run test:unit` | Run pure-logic unit tests (`src/**/*.test.ts`) |
+| `npm run test:schema` | Apply migrations to an in-memory Postgres and test RLS/triggers |
 
-## Get a fresh project
+## Project structure
 
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+src/
+  app/            screens and navigation (Expo Router, file-based)
+  components/     reusable UI components
+  lib/            data access, auth, and business logic
+    settlement.ts   pure debt-simplification algorithm (no UI, no DB)
+    houses.ts       house queries (create / join / list)
+    games.ts        games, players, buy-ins, leaderboard, settlement bridge
+    auth.tsx        AuthProvider / useAuth() — the one source of session state
+    format.ts       dollars-string <-> integer-cents, date display
+  constants/      theme constants
+  hooks/          shared React hooks
+supabase/
+  migrations/     SQL schema (source of truth for the database)
+tests/            schema tests (run against an in-memory Postgres)
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Documentation
 
-### Other setup steps
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — data model, RLS/schema decisions, and the
+  reasoning behind them
+- [CLAUDE.md](./CLAUDE.md) — quick operating reference (commands, file map, conventions)
+- [AGENTS.md](./AGENTS.md) — a heads-up that Expo has changed significantly across
+  versions; check the versioned docs before relying on older guidance
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+## License
 
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+MIT — see [LICENSE](./LICENSE).

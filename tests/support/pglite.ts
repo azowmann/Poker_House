@@ -5,10 +5,13 @@
  * PGlite is the real Postgres engine compiled to WASM, so the migrations run
  * unmodified - policies, triggers, plpgsql and all.
  *
- * What it is NOT: Supabase. There is no GoTrue, no PostgREST, no JWT. The
- * bootstrap below hand-rolls the few things Supabase would have provided (the
- * `auth` schema, `auth.uid()`, and the `anon` / `authenticated` roles), so a test
- * passing here means the SQL is sound, not that the hosted stack is configured.
+ * What it is NOT: Supabase. There is no GoTrue, no PostgREST, no JWT, and no
+ * real Storage service - the `storage` schema below is a hand-rolled stand-in
+ * (just enough of `storage.buckets`/`storage.objects`/`storage.foldername()` for
+ * a migration that references them to apply and for its RLS policies to be
+ * exercised), not Supabase Storage itself. A test passing here means the SQL is
+ * sound, not that the hosted stack is configured - actual file upload/download
+ * behaviour can only be verified against a real project.
  */
 import fs from 'fs';
 import path from 'path';
@@ -40,6 +43,35 @@ create role anon nologin;
 create role authenticated nologin;
 grant usage on schema public, auth to anon, authenticated;
 grant execute on function auth.uid() to anon, authenticated;
+
+-- A minimal stand-in for Supabase Storage's own schema - see the header comment.
+create schema if not exists storage;
+
+create table storage.buckets (
+  id text primary key,
+  name text not null,
+  public boolean not null default false
+);
+
+create table storage.objects (
+  id uuid primary key default gen_random_uuid(),
+  bucket_id text references storage.buckets (id),
+  name text,
+  owner uuid,
+  created_at timestamptz not null default now()
+);
+
+alter table storage.objects enable row level security;
+
+create or replace function storage.foldername(name text)
+returns text[]
+language sql immutable as $fn$
+  select string_to_array(name, '/')
+$fn$;
+
+grant usage on schema storage to anon, authenticated;
+grant select on storage.objects to anon;
+grant select, insert, update, delete on storage.objects to authenticated;
 `;
 
 export type TestDb = {
