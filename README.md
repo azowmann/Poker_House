@@ -35,67 +35,6 @@ gambling backend. It's a ledger for games you're already playing in person.
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full data model and the reasoning
 behind these choices.
 
-## Getting started
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 20+
-- A [Supabase](https://supabase.com) project (free tier is fine)
-- The [Expo Go](https://expo.dev/go) app, or an iOS/Android simulator, to run the app
-
-### Setup
-
-1. Install dependencies:
-
-   ```bash
-   npm install
-   ```
-
-2. Configure Supabase. Copy `.env.example` to `.env` and fill in your project's
-   URL and anon key (Supabase dashboard → **Project Settings → API**):
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Both values are safe to ship in the app bundle — they identify the project,
-   not grant access. Row Level Security decides what a caller may read or write.
-   **Never** put the `service_role` key here.
-
-3. Apply the database schema. Either link to your hosted project and push the
-   migrations:
-
-   ```bash
-   npx supabase link --project-ref <your-project-ref>
-   npx supabase db push
-   ```
-
-   or run Supabase locally with the CLI ([Docker](https://www.docker.com/) required):
-
-   ```bash
-   npx supabase start
-   ```
-
-4. Start the app:
-
-   ```bash
-   npx expo start
-   ```
-
-   Then open it in Expo Go, an iOS simulator, an Android emulator, or a web
-   browser from the Expo CLI output.
-
-## Scripts
-
-| Command | What it does |
-|---|---|
-| `npm start` | Start the Expo dev server |
-| `npm run ios` / `npm run android` / `npm run web` | Start on a specific platform |
-| `npm run lint` | Lint the project |
-| `npm test` | Run all tests (unit + schema) |
-| `npm run test:unit` | Run pure-logic unit tests (`src/**/*.test.ts`) |
-| `npm run test:schema` | Apply migrations to an in-memory Postgres and test RLS/triggers |
-
 ## Project structure
 
 ```
